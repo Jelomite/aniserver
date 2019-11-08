@@ -1,6 +1,6 @@
 import express from "express";
-import twistRouter from "./twist";
-import horriblesubsRouter from "./horriblesubs";
+import twistRouter from "./routers/twist";
+import horriblesubsRouter from "./routers/horriblesubs";
 
 const app = express();
 const port = process.env.PORT || 12345;
