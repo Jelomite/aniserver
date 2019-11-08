@@ -2,10 +2,9 @@ import express from "express";
 import {si} from "nyaapi";
 import Webtorrent from "webtorrent";
 import parseTorrent from "parse-torrent";
-import sendSeekable from "send-seekable";
+import parseRange from "range-parser";
 
 const app = express();
-app.use(sendSeekable);
 
 // once the server starts, a new  webtorrent client will start.
 let client = new Webtorrent();
@@ -49,10 +48,38 @@ app.get("/stream/:hash", (req, res) => {
 	client.add(req.params.hash, torrent => {
 		console.log(torrent.name);
 		const file = torrent.files[0];
+
+		// delete the torrent when done.
+		torrent.on("done", () => {
+			torrent.destroy(() => console.log("deleting torrent", torrent.infoHash));
+		});
+
+		try {
+			// try setting up the required headers for the partial content streaming protocol.
+			res.set("Accept-Ranges", "bytes");
+			res.set("Conent-Length", file.length);
+
+			const ranges = parseRange(file.length, req.headers.range);
+			if (ranges === -1) {
+			//unsatisfiable range
+				res.set("Content-Range", "*/" + file.length);
+				res.sendStatus(416);
+			}
+
+			const {start, end} = ranges[0];
+			res.status(206);
+			res.set("Content-Length", (end - start) + 1); //end is inclusive.
+			res.set("Content-Range", `bytes ${start}-${end}/${file.length}`);
+			stream = file.createReadStream({
+				start,
+				end,
+			});
+
+		} catch {
+			stream = file.createReadStream();
+		}
 		// create a streamable buffer and stream it over the connection.
-		// all of the headers are being manipulated by the `sendSeekable` middleware.
-		stream = file.createReadStream();
-		res.sendSeekable(stream, {length: file.length});
+		stream.pipe(res);
 	});
 
 	// this handles all of the errors, but we use it for one main error:
@@ -60,7 +87,7 @@ app.get("/stream/:hash", (req, res) => {
 	client.on("error", () => {
 		// we find this file with some filtering.
 		const fileExists = client.torrents.filter(({infoHash}) => req.params.hash === infoHash);
-		const file = fileExists[0].files[0];
+		const file = fileExists[0] ? fileExists[0].files[0] : null;
 
 		// if the file doesnt exist, this means the error we encountered isn't the main one.
 		// TODO: log the unique error.
@@ -69,10 +96,6 @@ app.get("/stream/:hash", (req, res) => {
 			return;
 		}
 		// what if we dont have a stream? this means the torrent client is already handling the file.
-		if (!stream) {
-			// we create a new stream buffer for piping.
-			stream = file.createReadStream();
-		}
 
 		// option A: the server already started streaming the file to this specific request
 		// option B: it doesn't.
@@ -80,10 +103,36 @@ app.get("/stream/:hash", (req, res) => {
 		// if it's options B, the try succeeds and we sendSeekable the stream with all the headers.
 		// if it's option A, the try failes and we pipe the stream without all of the headers.
 		try {
-			res.sendSeekable(stream, {length: file.length});
+			// trying to setup the headers, as with the initial part.
+			res.set("Accept-Ranges", "bytes");
+			res.set("Conent-Length", file.length);
+
+			const ranges = parseRange(file.length, req.headers.range);
+			if (ranges === -1) {
+				//unsatisfiable range
+				res.set("Content-Range", "*/" + file.length);
+				res.sendStatus(416);
+			}
+
+			const {start, end} = ranges[0];
+			res.status(206);
+			res.set("Content-Length", (end - start) + 1); //end is inclusive.
+			res.set("Content-Range", `bytes ${start}-${end}/${file.length}`);
+			if (!stream) {
+				// we create a new stream buffer for piping if there isn't one.
+				stream = file.createReadStream({
+					start,
+					end,
+				});
+			}
+
 		} catch {
-			stream.pipe(res);
+			if (!stream) {
+				// we create a new stream buffer for piping if there isn't one.
+				stream = file.createReadStream();
+			}
 		}
+		stream.pipe(res);
 	});
 
 	// once the request has finished, we just log it.

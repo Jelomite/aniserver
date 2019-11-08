@@ -12,6 +12,7 @@
     "express": "^4.17.1",
     "nyaapi": "^2.1.0",
     "parse-torrent": "^7.0.1",
+    "range-parser": "^1.2.1",
     "send-seekable": "^1.0.4",
     "webtorrent": "^0.107.16"
   },
