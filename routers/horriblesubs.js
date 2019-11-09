@@ -43,6 +43,11 @@ app.get("/api/sources/:slug", (req, res) => {
 // GET localhost:port/horriblesubs/stream/HASH
 // the request must come from a <video> tag with the url for the stream to work.
 app.get("/stream/:hash", (req, res) => {
+	if (client) {
+		console.log("deleting existing webtorrent");
+		client.destroy();
+	}
+
 	client = new Webtorrent();
 	// create a stream file in the request scope for later manipulation.
 	let stream;
@@ -51,6 +56,8 @@ app.get("/stream/:hash", (req, res) => {
 	client.add(req.params.hash, torrent => {
 		console.log(torrent.name);
 		const file = torrent.files[0];
+
+		torrent.on("download", () => console.log(torrent.progress, torrent.path));
 
 		// delete the torrent when done.
 		torrent.on("done", () => {
