@@ -20,6 +20,47 @@ export const getSources = async (term) => {
 	});
 };
 
+// destroy torrent download and delete files
+const destroy = torrent => {
+	torrent.destroy(() => {
+		console.log("destroyed", torrent.path);
+		rimraf(torrent.path, {maxBusyTries: 10}, e => {
+			if (e) {
+				console.error(e);
+			} else {
+				console.log("deleted file");
+			}
+		});
+	});
+};
+
+// stream buffer with the required headers
+const seekable = (stream, {length}, req, res) => {
+	res.set("Accept-Ranges", "bytes");
+	res.set("Conent-Length", length);
+
+	const ranges = parseRange(length, req.headers.range);
+	if (ranges === -1) {
+		// unsatisfiable range
+		res.set("Content-Range", "*/" + length);
+		res.sendStatus(416);
+	}
+
+	const {start, end} = ranges[0];
+	res.status(206);
+	res.set("Content-Length", (end - start) + 1); //end is inclusive.
+	res.set("Content-Range", `bytes ${start}-${end}/${length}`);
+
+	stream.pipe(res);
+};
+
+app.use("/stream", (req, res, next) => {
+	res.sendSeekable = (stream, config) => {
+		seekable(stream, config, req, res);
+	};
+	next();
+});
+
 // GET localhost:port/horriblesubs/api/sources/one%20punch%20man?resolution=720p ->
 // will return all of "one punch man" sources with 720p resolution.
 // available resolutions: 480p, 720p, 1080p.
@@ -51,6 +92,7 @@ app.get("/stream/:hash", (req, res) => {
 	client = new Webtorrent();
 	// create a stream file in the request scope for later manipulation.
 	let stream;
+	const keepFile = req.headers["keep-file"] !== "keep";
 
 	// let's add the new hash to our client.
 	client.add(req.params.hash, torrent => {
@@ -70,43 +112,18 @@ app.get("/stream/:hash", (req, res) => {
 		});
 
 		try {
-			// try setting up the required headers for the partial content streaming protocol.
-			res.set("Accept-Ranges", "bytes");
-			res.set("Conent-Length", file.length);
-
 			const ranges = parseRange(file.length, req.headers.range);
-			if (ranges === -1) {
-			//unsatisfiable range
-				res.set("Content-Range", "*/" + file.length);
-				res.sendStatus(416);
-			}
-
 			const {start, end} = ranges[0];
-			res.status(206);
-			res.set("Content-Length", (end - start) + 1); //end is inclusive.
-			res.set("Content-Range", `bytes ${start}-${end}/${file.length}`);
-			stream = file.createReadStream({
-				start,
-				end,
-			});
+			stream = stream || file.createReadStream({start,	end});
+			res.sendSeekable(stream, file);
 
 		} catch {
-			stream = file.createReadStream();
+			stream = stream || file.createReadStream();
+			stream.pipe(res);
 		}
-		// create a streamable buffer and stream it over the connection.
-		stream.pipe(res);
 		onFinished(res, () => {
-			if (onFinished.isFinished(req)) {
-				torrent.destroy(() => {
-					console.log("destroyed", torrent.path);
-					rimraf(torrent.path, {maxBusyTries: 10}, e => {
-						if (e) {
-							console.error(e);
-						} else {
-							console.log("deleted file");
-						}
-					});
-				});
+			if (onFinished.isFinished(req) && keepFile) {
+				destroy(torrent);
 			}
 		});
 	});
@@ -120,61 +137,23 @@ app.get("/stream/:hash", (req, res) => {
 		// if the file doesnt exist, this means the error we encountered isn't the main one.
 		// TODO: log the unique error.
 		if (!file) {
-			// for now, returning is good enough.
-			// console.error("-------------------------------------------------\n", e);
 			console.log(torrent.files);
 			return;
 		}
-		// what if we dont have a stream? this means the torrent client is already handling the file.
 
-		// option A: the server already started streaming the file to this specific request
-		// option B: it doesn't.
-
-		// if it's options B, the try succeeds and we sendSeekable the stream with all the headers.
-		// if it's option A, the try failes and we pipe the stream without all of the headers.
 		try {
-			// trying to setup the headers, as with the initial part.
-			res.set("Accept-Ranges", "bytes");
-			res.set("Conent-Length", file.length);
-
 			const ranges = parseRange(file.length, req.headers.range);
-			if (ranges === -1) {
-				//unsatisfiable range
-				res.set("Content-Range", "*/" + file.length);
-				res.sendStatus(416);
-			}
-
 			const {start, end} = ranges[0];
-			res.status(206);
-			res.set("Content-Length", (end - start) + 1); //end is inclusive.
-			res.set("Content-Range", `bytes ${start}-${end}/${file.length}`);
-			if (!stream) {
-				// we create a new stream buffer for piping if there isn't one.
-				stream = file.createReadStream({
-					start,
-					end,
-				});
-			}
+			stream = stream || file.createReadStream({start,	end});
+			res.sendSeekable(stream, file);
 
 		} catch {
-			if (!stream) {
-				// we create a new stream buffer for piping if there isn't one.
-				stream = file.createReadStream();
-			}
+			stream = stream || file.createReadStream();
+			stream.pipe(res);
 		}
-		stream.pipe(res);
 		onFinished(res, () => {
-			if (onFinished.isFinished(req)) {
-				torrent.destroy(() => {
-					console.log("destroyed", torrent.path);
-					rimraf(torrent.path, {maxBusyTries: 10}, e => {
-						if (e) {
-							console.error(e);
-						} else {
-							console.log("deleted file");
-						}
-					});
-				});
+			if (onFinished.isFinished(req) && keepFile) {
+				destroy(torrent);
 			}
 		});
 	});
