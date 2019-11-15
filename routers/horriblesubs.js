@@ -3,13 +3,12 @@ import {si} from "nyaapi";
 import Webtorrent from "webtorrent";
 import parseTorrent from "parse-torrent";
 import parseRange from "range-parser";
-import onFinished from "on-finished";
 import rimraf from "rimraf";
 
 const app = express();
 
 // once the server starts, a new  webtorrent client will start.
-let client;
+const client = new Webtorrent();
 
 // search for a specific show, will return all horriblesubs files uploaded to nyaa.si
 export const getSources = async (term) => {
@@ -35,31 +34,40 @@ const destroy = torrent => {
 };
 
 // stream buffer with the required headers
-const seekable = (stream, {length}, req, res) => {
+const seekable = (file, req, res) => {
 	res.set("Accept-Ranges", "bytes");
-	res.set("Conent-Length", length);
-
-	const ranges = parseRange(length, req.headers.range);
+	res.set("Conent-Length", file.length);
+	const ranges = parseRange(file.length, req.headers.range || "");
 	if (ranges === -1) {
 		// unsatisfiable range
-		res.set("Content-Range", "*/" + length);
+		res.set("Content-Range", "*/" + file.length);
 		res.sendStatus(416);
 	}
 
 	const {start, end} = ranges[0];
 	res.status(206);
 	res.set("Content-Length", (end - start) + 1); //end is inclusive.
-	res.set("Content-Range", `bytes ${start}-${end}/${length}`);
+	res.set("Content-Range", `bytes ${start}-${end}/${file.length}`);
 
+	const stream = file.createReadStream({start, end});
 	stream.pipe(res);
 };
 
 app.use("/stream", (req, res, next) => {
-	res.sendSeekable = (stream, config) => {
-		seekable(stream, config, req, res);
+	res.sendSeekable = file => {
+		seekable(file, req, res);
 	};
 	next();
 });
+
+// validate the infoHash
+const validateInfoHash = (req, res, next) => {
+	if (req.params.hash === "" || typeof req.params.hash === "undefined") {
+		res.status(500).send("invalid infoHash");
+	} else {
+		next();
+	}
+};
 
 // GET localhost:port/horriblesubs/api/sources/one%20punch%20man?resolution=720p ->
 // will return all of "one punch man" sources with 720p resolution.
@@ -83,80 +91,46 @@ app.get("/api/sources/:slug", (req, res) => {
 
 // GET localhost:port/horriblesubs/stream/HASH
 // the request must come from a <video> tag with the url for the stream to work.
-app.get("/stream/:hash", (req, res) => {
-	if (client) {
-		console.log("deleting existing webtorrent");
-		client.destroy();
+app.get("/stream/:hash", validateInfoHash, (req, res) => {
+	try {
+		const torrent = client.get(req.params.hash);
+		const file = torrent.files[0]; // there's only one file in the torrent.
+		try {
+			res.sendSeekable(file);
+		} catch {
+			const stream = file.createReadStream();
+			stream.pipe(res);
+		}
+	} catch (err) {
+		res.status(500).send(err);
+	}
+});
+
+app.get("/api/add/:hash", validateInfoHash, (req, res) => {
+	client.add(req.params.hash, () => {
+		res.status(200).send("Added torrent!");
+		console.log("added torrent");
+	});
+
+	client.on("error", err => {
+		res.status(500).send(err.toString());
+	});
+});
+
+app.get("/api/delete/:hash", validateInfoHash, (req, res) => {
+	console.log("destroying torrent");
+	const torrent = client.get(req.params.hash);
+	try {
+		if (req.headers["keep-alive"] === "keep") {
+			client.remove(torrent);
+		} else {
+			destroy(torrent);
+		}
+		res.status(200).send("Removed torrent");
+	} catch (err) {
+		res.status(500).send(err);
 	}
 
-	client = new Webtorrent();
-	// create a stream file in the request scope for later manipulation.
-	let stream;
-	const keepFile = req.headers["keep-file"] !== "keep";
-
-	// let's add the new hash to our client.
-	client.add(req.params.hash, torrent => {
-		console.log(torrent.name);
-		const file = torrent.files[0];
-
-		torrent.on("download", () => console.log(torrent.progress, torrent.path));
-
-		// delete the torrent when done.
-		torrent.on("done", () => {
-			if (onFinished.isFinished(req)) {
-				torrent.destroy(() => {
-					console.log("deleted", torrent.path);
-					rimraf(torrent.path, {maxBusyTries: 10}, () => {});
-				});
-			}
-		});
-
-		try {
-			const ranges = parseRange(file.length, req.headers.range);
-			const {start, end} = ranges[0];
-			stream = stream || file.createReadStream({start,	end});
-			res.sendSeekable(stream, file);
-
-		} catch {
-			stream = stream || file.createReadStream();
-			stream.pipe(res);
-		}
-		onFinished(res, () => {
-			if (onFinished.isFinished(req) && keepFile) {
-				destroy(torrent);
-			}
-		});
-	});
-
-	// this handles all of the errors, but we use it for one main error:
-	// the client already has the torrent hash downloading...
-	client.on("error", () => {
-		const torrent = client.get(req.params.hash);
-		const file = torrent ? torrent.files[0] : null;
-
-		// if the file doesnt exist, this means the error we encountered isn't the main one.
-		// TODO: log the unique error.
-		if (!file) {
-			console.log(torrent.files);
-			return;
-		}
-
-		try {
-			const ranges = parseRange(file.length, req.headers.range);
-			const {start, end} = ranges[0];
-			stream = stream || file.createReadStream({start,	end});
-			res.sendSeekable(stream, file);
-
-		} catch {
-			stream = stream || file.createReadStream();
-			stream.pipe(res);
-		}
-		onFinished(res, () => {
-			if (onFinished.isFinished(req) && keepFile) {
-				destroy(torrent);
-			}
-		});
-	});
 });
 
 export default app;
