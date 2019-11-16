@@ -133,4 +133,22 @@ app.get("/api/delete/:hash", validateInfoHash, (req, res) => {
 
 });
 
+app.get("/api/client", (req, res) => {
+	const data = {
+		"downSpeed": client.downloadSpeed,
+		"upSpeed": client.uploadSpeed,
+		"totalProgress": client.progress,
+		"torrents": client.torrents.map(torrent => ({
+			"name": torrent.name,
+			"infoHash": torrent.infoHash,
+			"remaining": torrent.timeRemaining,
+			"downloaded": torrent.downloaded,
+			"downSpeed": torrent.downloadSpeed,
+			"upSpeed": torrent.uploadSpeed,
+			"progress": torrent.progress,
+		})),
+	};
+	res.send(data);
+});
+
 export default app;
